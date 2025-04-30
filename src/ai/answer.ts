@@ -1,146 +1,213 @@
-import { KnowledgeQuery, KnowledgeSearchResult } from '../knowledge/query';
-import { OpenAIClient, ChatMessage } from './openaiClient';
-import { 
-  generateSystemPrompt, 
-  generateUserPrompt, 
-  formatKnowledgeContext,
-  generateSummaryPrompt,
-  generateAssignmentGuidancePrompt
-} from './promptTemplates';
+import { OpenAIClient, openai } from './openaiClient';
+import { KnowledgeQuery } from '../knowledge/query';
+import { PromptTemplates } from './promptTemplates';
+import { KnowledgeType, QueryParams } from '../knowledge/types';
 import { logger } from '../utils/logger';
 
-export interface AnswerResponse {
-  answer: string;
-  sources: KnowledgeSearchResult[];
-  isDirectMatch: boolean;
-}
-
-export class AnswerEngine {
-  private openai: OpenAIClient;
+/**
+ * AI 回答生成器 - 负责生成对用户问题的回答
+ */
+export class AnswerGenerator {
+  private openaiClient: OpenAIClient;
   private knowledgeQuery: KnowledgeQuery;
 
-  constructor(openaiApiKey: string, knowledgeQuery: KnowledgeQuery) {
-    this.openai = new OpenAIClient(openaiApiKey);
-    this.knowledgeQuery = knowledgeQuery;
+  constructor() {
+    this.openaiClient = new OpenAIClient();
+    this.knowledgeQuery = new KnowledgeQuery();
   }
 
   /**
-   * 使用知识库获取问题的答案
-   * @param question 用户的问题
-   * @param courseId 可选的课程ID以限定搜索范围
-   * @returns 带有来源的答案
+   * 生成回答
+   * @param question - 用户问题
+   * @param courseId - 可选的课程 ID 过滤
+   * @returns 生成的回答
    */
-  async getAnswer(question: string, courseId?: string): Promise<AnswerResponse> {
-    logger.info(`回答问题: "${question}"${courseId ? ` 课程ID ${courseId}` : ''}`);
-    
-    // 在知识库中搜索相关信息
-    const results = await this.knowledgeQuery.search(question, courseId, 10);
-    
-    // 如果没有找到任何内容则返回"无信息"
-    if (results.length === 0) {
-      logger.warn('在知识库中未找到相关信息');
-      return {
-        answer: "我在知识库中没有找到相关信息。",
-        sources: [],
-        isDirectMatch: false
+  public async generateAnswer(question: string, courseId?: number): Promise<string> {
+    try {
+      logger.info(`Generating answer for question: "${question}"`);
+      
+      // 确定相关的提示模板
+      const promptTemplate = this.determinePromptTemplate(question);
+      
+      // 查询知识库获取相关上下文
+      const queryParams: QueryParams = {
+        query: question,
+        courseId,
+        limit: 5,
+        threshold: 10 // 最低相关性分数
       };
+      
+      const matchResults = await this.knowledgeQuery.query(queryParams);
+      
+      // 提取上下文信息
+      const contexts: string[] = matchResults.map(result => {
+        const item = result.item;
+        return `【${item.title}】(${item.type})\n${item.content}`;
+      });
+      
+      // 如果没有找到相关上下文，使用特殊提示模板
+      if (contexts.length === 0) {
+        logger.info('No relevant context found, using NO_CONTEXT_REPLY template');
+        return await this.openaiClient.complete(
+          PromptTemplates.NO_CONTEXT_REPLY + question
+        );
+      }
+      
+      // 生成回答
+      const contextText = contexts.join('\n\n');
+      const promptText = `${promptTemplate}\n\n问题: ${question}\n\n上下文信息:\n${contextText}`;
+      
+      const answer = await this.openaiClient.complete(promptText);
+      
+      logger.info('Answer generated successfully');
+      return answer;
+    } catch (error) {
+      logger.error(`Failed to generate answer: ${error instanceof Error ? error.message : String(error)}`);
+      return '抱歉，生成回答时遇到了问题。请稍后再试或联系技术支持。';
     }
+  }
 
-    // 检查是否有相关度很高的直接匹配
-    const directMatch = results.find(r => r.relevance > 15);
-    if (directMatch) {
-      logger.info('找到高相关度的直接匹配');
-      return {
-        answer: directMatch.content,
-        sources: [directMatch],
-        isDirectMatch: true
-      };
+  /**
+   * 根据问题内容确定使用哪个提示模板
+   * @param question - 用户问题
+   * @returns 选定的提示模板
+   */
+  private determinePromptTemplate(question: string): string {
+    // 转为小写以便不区分大小写匹配
+    const lowerQuestion = question.toLowerCase();
+    
+    // 高分攻略相关
+    if (
+      lowerQuestion.includes('高分') || 
+      lowerQuestion.includes('好成绩') ||
+      lowerQuestion.includes('满分') ||
+      lowerQuestion.includes('如何得分') ||
+      lowerQuestion.includes('评分标准') ||
+      lowerQuestion.includes('分数') ||
+      lowerQuestion.includes('高mark') ||
+      lowerQuestion.includes('high mark')
+    ) {
+      return PromptTemplates.HOW_TO_GET_GOOD_MARKS;
     }
+    
+    // 解释复杂概念
+    if (
+      lowerQuestion.includes('解释') ||
+      lowerQuestion.includes('什么是') ||
+      lowerQuestion.includes('定义') ||
+      lowerQuestion.includes('概念') ||
+      lowerQuestion.includes('意思')
+    ) {
+      return PromptTemplates.EXPLAIN_COMPLEX_CONCEPT;
+    }
+    
+    // 课程内容总结
+    if (
+      lowerQuestion.includes('总结') ||
+      lowerQuestion.includes('概述') ||
+      lowerQuestion.includes('介绍') ||
+      lowerQuestion.includes('大纲')
+    ) {
+      return PromptTemplates.SUMMARIZE_COURSE_CONTENT;
+    }
+    
+    // 作业规划
+    if (
+      lowerQuestion.includes('规划') ||
+      lowerQuestion.includes('计划') ||
+      lowerQuestion.includes('如何完成') ||
+      lowerQuestion.includes('准备') ||
+      lowerQuestion.includes('步骤')
+    ) {
+      return PromptTemplates.ASSIGNMENT_PLANNING;
+    }
+    
+    // 考试复习
+    if (
+      lowerQuestion.includes('考试') ||
+      lowerQuestion.includes('复习') ||
+      lowerQuestion.includes('测验') ||
+      lowerQuestion.includes('quiz') ||
+      lowerQuestion.includes('exam') ||
+      lowerQuestion.includes('midterm') ||
+      lowerQuestion.includes('final')
+    ) {
+      return PromptTemplates.EXAM_REVISION;
+    }
+    
+    // 默认使用基础提示模板
+    return PromptTemplates.BASE_SYSTEM_PROMPT;
+  }
+}
 
-    // 从搜索结果为GPT格式化上下文
-    const context = formatKnowledgeContext(results);
+// Create a singleton instance
+export const answerGenerator = new AnswerGenerator();
+
+/**
+ * Generate an answer to a question
+ * 
+ * @param question The question to answer
+ * @param options Options for generating the answer
+ * @returns The answer and context used to generate it
+ */
+export async function generateAnswer(
+  question: string, 
+  options?: { 
+    courseId?: number, 
+    showContext?: boolean 
+  }
+): Promise<{ 
+  answer: string, 
+  context?: string[] 
+}> {
+  try {
+    logger.info(`Generating answer for question: "${question}"`);
     
-    // 使用GPT生成回复
-    const messages: ChatMessage[] = [
-      generateSystemPrompt(),
-      generateUserPrompt(question, context)
-    ];
+    // Create a new query to get context
+    const knowledgeQuery = new KnowledgeQuery();
     
-    const answer = await this.openai.generateChatCompletion(messages);
+    // Query the knowledge base for relevant context
+    const queryParams: QueryParams = {
+      query: question,
+      courseId: options?.courseId,
+      limit: 5,
+      threshold: 10 // Minimum relevance score
+    };
     
-    // 返回AI生成的答案和来源
+    const matchResults = await knowledgeQuery.query(queryParams);
+    
+    // Extract context information
+    const contexts: string[] = matchResults.map(result => {
+      const item = result.item;
+      return `【${item.title}】(${item.type})\n${item.content}`;
+    });
+    
+    let answer: string;
+    
+    // If no relevant context found, use special prompt template
+    if (contexts.length === 0) {
+      logger.info('No relevant context found, using base template');
+      answer = await openai.complete(
+        `Please answer the following question about Moodle based on your knowledge:\n\nQuestion: ${question}`
+      );
+    } else {
+      // Generate answer using the context
+      const contextText = contexts.join('\n\n');
+      const promptText = `Please answer the following question about Moodle based on the provided context information:\n\nQuestion: ${question}\n\nContext Information:\n${contextText}`;
+      
+      answer = await openai.complete(promptText);
+    }
+    
+    logger.info('Answer generated successfully');
+    
     return {
       answer,
-      sources: results,
-      isDirectMatch: false
+      context: options?.showContext ? contexts : undefined
     };
-  }
-
-  /**
-   * 生成最近课程公告的摘要
-   * @param courseId 课程ID
-   * @param limit 要总结的最大公告数
-   * @returns 摘要文本
-   */
-  async summarizeAnnouncements(courseId: string, courseName: string, limit: number = 10): Promise<string> {
-    logger.info(`为课程 ${courseId} 生成公告摘要`);
-    
-    // 获取课程的最近公告
-    const results = await this.knowledgeQuery.search('announcement', courseId, limit);
-    
-    if (results.length === 0) {
-      return "未找到此课程的最近公告。";
-    }
-    
-    // 只包含公告
-    const announcements = results.filter(r => r.source === 'announcement' || r.title?.toLowerCase().includes('announce'));
-    
-    if (announcements.length === 0) {
-      return "未找到此课程的最近公告。";
-    }
-    
-    // 为AI格式化公告
-    const context = formatKnowledgeContext(announcements);
-    
-    // 生成摘要
-    const messages = generateSummaryPrompt(courseName, context);
-    const summary = await this.openai.generateChatCompletion(messages);
-    
-    return summary;
-  }
-  
-  /**
-   * 获取特定作业的指导
-   * @param courseId 课程ID
-   * @param assignmentName 作业名称
-   * @returns 指导文本
-   */
-  async getAssignmentGuidance(courseId: string, assignmentName: string): Promise<AnswerResponse> {
-    logger.info(`获取课程 ${courseId} 中作业 "${assignmentName}" 的指导`);
-    
-    // 搜索有关作业的信息
-    const searchTerms = `assignment "${assignmentName}" requirements criteria rubric`;
-    const results = await this.knowledgeQuery.search(searchTerms, courseId, 15);
-    
-    if (results.length === 0) {
-      return {
-        answer: `我在知识库中没有找到关于作业 "${assignmentName}" 的信息。`,
-        sources: [],
-        isDirectMatch: false
-      };
-    }
-    
-    // 为GPT格式化上下文
-    const context = formatKnowledgeContext(results);
-    
-    // 生成作业指导
-    const messages = generateAssignmentGuidancePrompt(assignmentName, context);
-    const guidance = await this.openai.generateChatCompletion(messages);
-    
+  } catch (error) {
+    logger.error(`Failed to generate answer: ${error instanceof Error ? error.message : String(error)}`);
     return {
-      answer: guidance,
-      sources: results,
-      isDirectMatch: false
+      answer: '抱歉，生成回答时遇到了问题。请稍后再试或联系技术支持。'
     };
   }
 }

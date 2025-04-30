@@ -1,17 +1,16 @@
 {
-  "moodle": {
-    "token": "your_moodle_token_here",
-    "baseUrl": "https://moodle.telt.unsw.edu.au"
-  },
-  "openai": {
-    "apiKey": "your_openai_api_key_here",
-    "model": "gpt-4"
+  "cookie": {
+    "MoodleSession": "YOUR_MOODLE_SESSION_COOKIE_HERE",
+    "MoodleSessionTest": "OPTIONAL_TEST_COOKIE_VALUE_HERE"
   },
   "courses": [
     {
-      "id": "12345",
-      "name": "COMP1000",
-      "term": "2025T1"
+      "id": 12345,
+      "name": "Example Course 1"
+    },
+    {
+      "id": 67890,
+      "name": "Example Course 2"
     }
   ]
 }

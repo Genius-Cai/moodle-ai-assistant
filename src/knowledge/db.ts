@@ -1,135 +1,142 @@
-import sqlite3 from 'sqlite3';
-import { open, Database } from 'sqlite';
-import fs from 'fs';
-import path from 'path';
+import * as sqlite3 from 'sqlite3';
+import { Database, open } from 'sqlite';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as dotenv from 'dotenv';
 import { logger } from '../utils/logger';
-import { config } from '../config/settings';
 
-// 数据库连接
-let db: Database<sqlite3.Database, sqlite3.Statement> | null = null;
+dotenv.config();
 
 /**
- * 初始化数据库连接
- * @returns 数据库连接对象
+ * 数据库管理类 - 负责处理与 SQLite 数据库的连接和初始化
  */
-export async function initDB(): Promise<Database<sqlite3.Database, sqlite3.Statement>> {
-  if (db) {
-    return db; // 已经初始化
-  }
+export class DatabaseManager {
+  private static instance: DatabaseManager;
+  private db: Database<sqlite3.Database> | null = null;
+  private dbPath: string;
+  private schemaPath: string;
 
-  try {
+  private constructor() {
+    // 从环境变量获取数据库路径，或使用默认值
+    this.dbPath = process.env.DB_PATH || './data/knowledge.db';
+    this.schemaPath = path.join(__dirname, 'schema.sql');
+    
     // 确保数据库目录存在
-    const dbPath = config.dbPath;
-    const dbDir = path.dirname(dbPath);
-
+    const dbDir = path.dirname(this.dbPath);
     if (!fs.existsSync(dbDir)) {
       fs.mkdirSync(dbDir, { recursive: true });
-      logger.info(`创建数据库目录: ${dbDir}`);
+    }
+  }
+
+  /**
+   * 获取 DatabaseManager 单例
+   */
+  public static getInstance(): DatabaseManager {
+    if (!DatabaseManager.instance) {
+      DatabaseManager.instance = new DatabaseManager();
+    }
+    return DatabaseManager.instance;
+  }
+
+  /**
+   * 初始化数据库，建立连接并创建表结构
+   */
+  public async init(): Promise<void> {
+    if (this.db) {
+      return;
     }
 
-    // 打开数据库连接
-    db = await open({
-      filename: dbPath,
-      driver: sqlite3.Database,
-    });
+    try {
+      this.db = await open({
+        filename: this.dbPath,
+        driver: sqlite3.Database
+      });
 
-    logger.info(`成功连接到数据库: ${dbPath}`);
+      // 启用外键约束
+      await this.db.exec('PRAGMA foreign_keys = ON');
+      
+      // 如果存在 schema.sql 文件，加载并执行
+      if (fs.existsSync(this.schemaPath)) {
+        const schema = fs.readFileSync(this.schemaPath, 'utf8');
+        await this.db.exec(schema);
+        logger.info('Database schema initialized successfully');
+      } else {
+        logger.error(`Schema file not found: ${this.schemaPath}`);
+      }
+    } catch (error) {
+      logger.error(`Failed to initialize database: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
 
-    // 启用外键约束
-    await db.exec('PRAGMA foreign_keys = ON');
+  /**
+   * 获取数据库连接
+   */
+  public async getDb(): Promise<Database<sqlite3.Database>> {
+    if (!this.db) {
+      await this.init();
+    }
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    return this.db;
+  }
 
-    // 初始化数据库表
-    await initSchema();
-
-    return db;
-  } catch (error) {
-    logger.error('初始化数据库失败', { error });
-    throw new Error(`初始化数据库失败: ${error}`);
+  /**
+   * 关闭数据库连接
+   */
+  public async close(): Promise<void> {
+    if (this.db) {
+      await this.db.close();
+      this.db = null;
+      logger.info('Database connection closed');
+    }
   }
 }
 
 /**
- * 初始化数据库表结构
+ * Knowledge database class - Handles database operations for the knowledge base
  */
-async function initSchema(): Promise<void> {
-  if (!db) {
-    throw new Error('数据库未初始化');
+export class KnowledgeDatabase {
+  private dbManager: DatabaseManager;
+  private dbPath: string = ''; // Initialize with empty string to fix the error
+
+  /**
+   * Initialize the knowledge database
+   * @param dbPath Optional path to the database file
+   */
+  constructor(dbPath?: string) {
+    if (dbPath) {
+      this.dbPath = dbPath;
+      // Use getInstance instead of direct constructor since it's private
+      this.dbManager = DatabaseManager.getInstance();
+      // Set custom path in environment if needed
+      process.env.DB_PATH = dbPath;
+    } else {
+      // Otherwise use the singleton instance
+      this.dbManager = DatabaseManager.getInstance();
+    }
   }
 
-  try {
-    const schemaPath = path.join(__dirname, 'schema.sql');
-    const schema = fs.readFileSync(schemaPath, 'utf8');
-    
-    // 执行建表SQL
-    await db.exec(schema);
-    logger.info('数据库表结构初始化成功');
-  } catch (error) {
-    logger.error('初始化数据库表结构失败', { error });
-    throw new Error(`初始化数据库表结构失败: ${error}`);
+  /**
+   * Initialize the database connection
+   */
+  async initialize(): Promise<void> {
+    await this.dbManager.init();
+    logger.info('Knowledge database initialized');
   }
-}
 
-/**
- * 关闭数据库连接
- */
-export async function closeDB(): Promise<void> {
-  if (db) {
-    await db.close();
-    db = null;
-    logger.info('数据库连接已关闭');
+  /**
+   * Close the database connection
+   */
+  async close(): Promise<void> {
+    await this.dbManager.close();
   }
-}
 
-/**
- * 获取数据库连接
- * @returns 数据库连接对象
- */
-export async function getDB(): Promise<Database<sqlite3.Database, sqlite3.Statement>> {
-  if (!db) {
-    return initDB();
-  }
-  return db;
-}
-
-/**
- * 执行数据库查询
- * @param sql SQL查询语句
- * @param params 查询参数
- * @returns 查询结果
- */
-export async function query<T = any>(sql: string, params: any[] = []): Promise<T[]> {
-  const database = await getDB();
-  return database.all<T[]>(sql, params);
-}
-
-/**
- * 执行数据库插入/更新/删除操作
- * @param sql SQL语句
- * @param params 查询参数
- * @returns 影响的行数
- */
-export async function execute(sql: string, params: any[] = []): Promise<number> {
-  const database = await getDB();
-  const result = await database.run(sql, params);
-  return result.changes || 0;
-}
-
-/**
- * 在事务中执行一系列SQL操作
- * @param callback 回调函数，包含要在事务中执行的SQL操作
- * @returns 回调函数的返回值
- */
-export async function transaction<T>(callback: (db: Database<sqlite3.Database, sqlite3.Statement>) => Promise<T>): Promise<T> {
-  const database = await getDB();
-  
-  try {
-    await database.exec('BEGIN');
-    const result = await callback(database);
-    await database.exec('COMMIT');
-    return result;
-  } catch (error) {
-    await database.exec('ROLLBACK');
-    logger.error('事务执行失败', { error });
-    throw error;
+  /**
+   * Get the database connection
+   */
+  async getDb(): Promise<Database<sqlite3.Database>> {
+    return await this.dbManager.getDb();
   }
 }

@@ -1,158 +1,218 @@
-import { query, getDB } from './db';
+import { DatabaseManager } from './db';
+import { KnowledgeItem, KnowledgeType, MatchResult, QueryParams } from './types';
 import { logger } from '../utils/logger';
-import { stripHtml } from '../utils/helpers';
-
-export interface KnowledgeSearchResult {
-  id: number;
-  courseId: string;
-  type: string;
-  title: string;
-  content: string;
-  source: string;
-  sourceId: string;
-  created: number;
-  modified: number;
-  relevance: number;
-}
 
 /**
- * 知识库搜索功能封装
+ * 知识库查询类 - 负责从知识库中检索相关内容
  */
 export class KnowledgeQuery {
-  /**
-   * 根据关键词搜索知识库
-   * @param keywords 搜索关键词
-   * @param courseId 可选的课程ID过滤
-   * @param limit 结果数量限制
-   * @returns 搜索结果
-   */
-  async search(keywords: string, courseId?: string, limit: number = 10): Promise<KnowledgeSearchResult[]> {
-    try {
-      logger.info(`搜索知识库: "${keywords}"${courseId ? ` 在课程 ${courseId}` : ''}`);
+  private dbManager: DatabaseManager;
 
-      // 准备搜索条件
-      const searchTerms = keywords
-        .replace(/"/g, '') // 移除双引号，避免SQL注入
-        .replace(/'/g, '') // 移除单引号
-        .trim();
+  constructor() {
+    this.dbManager = DatabaseManager.getInstance();
+  }
+
+  /**
+   * 查询知识库中的内容
+   * @param params - 查询参数
+   * @returns 匹配的知识项数组
+   */
+  public async query(params: QueryParams): Promise<MatchResult[]> {
+    try {
+      const db = await this.dbManager.getDb();
       
-      if (!searchTerms) {
-        logger.warn('搜索词为空');
-        return [];
+      // 准备查询条件
+      const conditions: string[] = [];
+      const queryParams: any[] = [];
+      
+      // 添加全文搜索条件
+      if (params.query) {
+        conditions.push('knowledge_fts MATCH ?');
+        // 为提高匹配效果，对查询进行预处理，添加通配符
+        const searchTerms = params.query
+          .split(/\s+/)
+          .filter(term => term.length > 2) // 过滤掉太短的词
+          .map(term => `${term}*`) // 添加通配符以进行前缀匹配
+          .join(' OR ');
+        queryParams.push(searchTerms || params.query); // 如果没有有效搜索词，则使用原始查询
       }
       
-      // 构建SQL查询
-      const params = [];
-      let sql = `
+      // 添加课程 ID 过滤条件
+      if (params.courseId !== undefined) {
+        conditions.push('items.course_id = ?');
+        queryParams.push(params.courseId);
+      }
+      
+      // 添加类型过滤条件
+      if (params.type !== undefined) {
+        conditions.push('items.type = ?');
+        queryParams.push(params.type);
+      }
+      
+      // 构建完整查询语句
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const limitClause = params.limit ? `LIMIT ${params.limit}` : 'LIMIT 10';
+      
+      // 执行查询，获取匹配项及其评分
+      const query = `
         SELECT 
-          id,
-          course_id as courseId,
-          type,
-          title,
-          content,
-          source,
-          source_id as sourceId,
-          created,
-          modified,
-          rank as relevance
-        FROM knowledge_fts
+          items.*,
+          highlight(knowledge_fts, 2, '<mark>', '</mark>') as highlighted_content,
+          rank * 100 as score
+        FROM 
+          knowledge_fts AS fts
+        JOIN 
+          knowledge_items AS items ON fts.rowid = items.rowid
+        ${whereClause}
+        ORDER BY score DESC
+        ${limitClause}
       `;
-
-      // 使用FTS5全文搜索
-      sql += ` WHERE knowledge_fts MATCH ?`;
-      params.push(searchTerms);
       
-      // 应用课程过滤
-      if (courseId) {
-        sql += ` AND course_id = ?`;
-        params.push(courseId);
-      }
-
-      // 限制结果数量并按匹配度排序
-      sql += ` ORDER BY rank LIMIT ?`;
-      params.push(limit);
-
-      // 执行查询
-      const results = await query<KnowledgeSearchResult>(sql, params);
+      const results = await db.all(query, ...queryParams);
       
-      logger.info(`搜索结果: ${results.length} 项`);
-      return results;
+      // 处理匹配结果，提取匹配词
+      const matchResults: MatchResult[] = results.map((row: any) => {
+        // 提取被高亮显示的匹配词
+        const matchedTermsSet = new Set<string>();
+        const highlighted = row.highlighted_content || '';
+        const matches = highlighted.match(/<mark>(.*?)<\/mark>/g) || [];
+        
+        matches.forEach((match: string) => {
+          const term = match.replace(/<mark>|<\/mark>/g, '').toLowerCase();
+          if (term.length > 1) { // 过滤掉单字符匹配
+            matchedTermsSet.add(term);
+          }
+        });
+        
+        // 处理分数和阈值
+        let score = row.score || 0;
+        const threshold = params.threshold || 10;
+        
+        // 如果分数太低，过滤掉
+        if (score < threshold) {
+          return null;
+        }
+        
+        // 如果在标题中找到匹配，提高分数
+        if (params.query) {
+          const titleLower = row.title.toLowerCase();
+          const queryLower = params.query.toLowerCase();
+          
+          if (titleLower === queryLower) {
+            score += 50; // 完全匹配标题
+          } else if (titleLower.includes(queryLower)) {
+            score += 30; // 部分匹配标题
+          }
+        }
+        
+        // 创建结果对象
+        const item: KnowledgeItem = {
+          id: row.id,
+          title: row.title,
+          type: row.type as KnowledgeType,
+          content: row.content,
+          html_content: row.html_content,
+          course_id: row.course_id,
+          course_name: row.course_name,
+          section_name: row.section_name,
+          url: row.url,
+          due_date: row.due_date,
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+          metadata: row.metadata ? JSON.parse(row.metadata) : undefined
+        };
+        
+        return {
+          item,
+          score,
+          matched_terms: Array.from(matchedTermsSet)
+        };
+      }).filter(Boolean) as MatchResult[]; // 过滤掉空结果
+      
+      logger.info(`Query "${params.query}" returned ${matchResults.length} results`);
+      
+      return matchResults;
     } catch (error) {
-      logger.error(`搜索知识库失败: ${error}`);
-      return [];
+      logger.error(`Failed to query knowledge base: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
     }
   }
 
   /**
-   * 按类型和课程获取最近的知识条目
-   * @param type 条目类型
-   * @param courseId 课程ID
-   * @param limit 结果数量限制
-   * @returns 知识条目
+   * 获取特定 ID 的知识项
+   * @param id - 知识项 ID
+   * @returns 知识项或 null
    */
-  async getRecentByType(type: string, courseId: string, limit: number = 10): Promise<KnowledgeSearchResult[]> {
+  public async getById(id: string): Promise<KnowledgeItem | null> {
     try {
-      const sql = `
-        SELECT
-          id,
-          course_id as courseId,
-          type,
-          title,
-          content,
-          source,
-          source_id as sourceId,
-          created,
-          modified,
-          0 as relevance
-        FROM knowledge_items
-        WHERE type = ? AND course_id = ?
-        ORDER BY created DESC
-        LIMIT ?
-      `;
+      const db = await this.dbManager.getDb();
+      const result = await db.get<any>('SELECT * FROM knowledge_items WHERE id = ?', id);
       
-      const results = await query<KnowledgeSearchResult>(sql, [type, courseId, limit.toString()]);
-      
-      logger.info(`获取最近${type}条目: ${results.length} 项`);
-      return results;
-    } catch (error) {
-      logger.error(`获取最近条目失败: ${error}`);
-      return [];
-    }
-  }
-
-  /**
-   * 获取知识条目详情
-   * @param id 知识条目ID
-   * @returns 知识条目详情
-   */
-  async getById(id: number): Promise<KnowledgeSearchResult | null> {
-    try {
-      const sql = `
-        SELECT
-          id,
-          course_id as courseId,
-          type,
-          title,
-          content,
-          source,
-          source_id as sourceId,
-          created,
-          modified,
-          0 as relevance
-        FROM knowledge_items
-        WHERE id = ?
-      `;
-      
-      const results = await query<KnowledgeSearchResult>(sql, [id]);
-      
-      if (results.length === 0) {
+      if (!result) {
         return null;
       }
       
-      return results[0];
+      return {
+        id: result.id,
+        title: result.title,
+        type: result.type as KnowledgeType,
+        content: result.content,
+        html_content: result.html_content,
+        course_id: result.course_id,
+        course_name: result.course_name,
+        section_name: result.section_name,
+        url: result.url,
+        due_date: result.due_date,
+        created_at: result.created_at,
+        updated_at: result.updated_at,
+        metadata: result.metadata ? JSON.parse(result.metadata) : undefined
+      };
     } catch (error) {
-      logger.error(`获取知识条目失败: ${error}`);
-      return null;
+      logger.error(`Failed to get knowledge item by ID: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
+   * 获取特定课程的所有知识项
+   * @param courseId - 课程 ID
+   * @param type - 可选，过滤特定类型的知识项
+   * @returns 知识项数组
+   */
+  public async getByCourse(courseId: number, type?: KnowledgeType): Promise<KnowledgeItem[]> {
+    try {
+      const db = await this.dbManager.getDb();
+      
+      let query = 'SELECT * FROM knowledge_items WHERE course_id = ?';
+      const params: any[] = [courseId];
+      
+      if (type) {
+        query += ' AND type = ?';
+        params.push(type);
+      }
+      
+      query += ' ORDER BY updated_at DESC';
+      
+      const results = await db.all<any[]>(query, ...params);
+      
+      return results.map(row => ({
+        id: row.id,
+        title: row.title,
+        type: row.type as KnowledgeType,
+        content: row.content,
+        html_content: row.html_content,
+        course_id: row.course_id,
+        course_name: row.course_name,
+        section_name: row.section_name,
+        url: row.url,
+        due_date: row.due_date,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        metadata: row.metadata ? JSON.parse(row.metadata) : undefined
+      }));
+    } catch (error) {
+      logger.error(`Failed to get knowledge items by course: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
     }
   }
 }

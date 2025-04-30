@@ -1,124 +1,136 @@
-# Moodle AI Assistant
+# Moodle AI Assistant (Cookie-based)
 
-An AI-powered assistant that fetches course content from UNSW's Moodle platform and answers questions using either direct matches or AI-generated responses.
+Moodle AI Assistant 是一个基于 Cookie 模拟登录的 Moodle 课程内容抓取和 AI 问答工具，让你可以轻松查询课程内容、作业要求、截止日期等信息，无需使用 Moodle API Token。
 
-## Features
+## 🌟 特性
 
-- Fetch course announcements, Q&A content, and assessment guides from Moodle
-- Integrate with additional learning platforms (EdStem, Ally)
-- Store and index data in a local SQLite knowledge base
-- Answer questions using direct keyword matching or AI-powered summaries
-- Support for multiple languages in question answering
-- CLI interface for easy interaction
+- 🔐 **基于 Cookie 模拟登录**：无需申请 Moodle API Token，只需从浏览器复制现有的登录 Cookie
+- 🕸️ **智能内容抓取**：自动抓取课程内容、作业要求、评分标准等
+- 🧠 **本地知识库**：将课程内容存储在本地 SQLite 数据库中
+- 🤖 **AI 智能问答**：使用 OpenAI GPT 模型解答关于课程的问题
+- 💻 **友好的命令行界面**：简单易用的交互式问答体验
 
-## Setup
+## 📋 先决条件
 
-1. Clone the repository
-2. Install dependencies:
+- Node.js v14.0.0 或更高版本
+- npm 或 yarn 包管理器
+- 有效的 OpenAI API 密钥
+- 已登录 Moodle 的浏览器 Cookie
+
+## 🛠️ 安装
+
+1. 克隆仓库：
+
+```bash
+git clone https://github.com/yourusername/moodle-ai-assistant.git
+cd moodle-ai-assistant
+```
+
+2. 安装依赖：
+
 ```bash
 npm install
 ```
-3. Copy configuration templates to create your config files:
+
+3. 编译 TypeScript 代码：
+
+```bash
+npm run build
+```
+
+4. 配置环境变量（复制 .env.example 并编辑）：
+
 ```bash
 cp .env.example .env
-cp src/config/auth.json.template src/config/auth.json
 ```
-4. Edit `.env` and add:
-   - `MOODLE_TOKEN`: Your Moodle API token
-   - `OPENAI_API_KEY`: Your OpenAI API key
-   - `COURSE_IDS`: Comma-separated list of course IDs you want to monitor
 
-## How to Get Your Moodle Token
+## ⚙️ 配置
 
-1. Log in to your Moodle account
-2. Go to your profile settings
-3. Navigate to Security tokens/API keys
-4. Generate a new token for external services
-5. Copy the token value to your configuration file
+### 1. 获取 Moodle Cookie
 
-## Usage
+1. 使用浏览器（Chrome/Firefox/Safari）登录你的 Moodle 网站
+2. 打开开发者工具（F12 或右键 -> 检查）
+3. 切换到 Network（网络）选项卡
+4. 刷新页面
+5. 找到任意一个 Moodle 请求，查看其 Request Headers（请求标头）中的 Cookie
+6. 复制 `MoodleSession=xxx` 部分
 
-### Fetch course content:
+### 2. 编辑 .env 文件
+
+在 .env 文件中填入以下信息：
+
+```
+# Moodle 配置
+MOODLE_BASE_URL=https://your.moodle.site.edu
+MOODLE_SESSION_COOKIE=your_moodle_session_cookie_here
+
+# OpenAI 配置
+OPENAI_API_KEY=your_openai_api_key_here
+
+# 课程ID配置（可配置多个，英文逗号分隔）
+COURSE_IDS=12345,67890
+
+# 数据库和日志配置
+DB_PATH=./data/knowledge.db
+LOG_LEVEL=info
+LOG_PATH=./logs
+
+# 抓取配置
+FETCH_DELAY=1000
+FETCH_TIMEOUT=30000
+```
+
+## 🚀 使用方法
+
+### 抓取课程内容
+
 ```bash
-npm run fetch -- -c <courseId>
+# 抓取所有配置的课程内容
+npm run fetch
+
+# 抓取特定课程内容
+npm run fetch -- -c 12345
+
+# 清除现有数据并重新抓取
+npm run fetch -- --clean
 ```
 
-### Ask a question:
+### 询问课程相关问题
+
 ```bash
-npm run ask -- "What is the midterm about?"
+# 直接提问
+npm run ask "midterm考试什么时候？"
+
+# 指定课程提问
+npm run ask "作业截止日期是什么时候？" -c 12345
+
+# 进入交互式问答模式
+npm run ask -i
 ```
 
-### Run automatic content updates:
-```bash
-npm run update
-```
+## 💡 示例问题
 
-## Development
+- "数据结构与算法这门课的评分标准是什么？"
+- "如何获得 Assignment 2 的高分？"
+- "下一个截止日期是什么时候？"
+- "期中考试会考哪些内容？"
+- "请详细解释一下链表和数组的区别"
 
-- `npm run build`: Build the TypeScript project
-- `npm run dev`: Run in development mode with hot reload
-- `npm run lint`: Run ESLint for code quality
-- `npm run test`: Run tests
-- `npm start`: Run the CLI tool
+## 🔄 更新 Cookie
 
-## Project Structure
+Moodle Session Cookie 通常会在一段时间后过期。当你收到认证错误时，需要重新获取新的 Cookie 并更新 .env 文件。
 
-- `src/fetchers/`: API integration with Moodle and other learning platforms
-  - `moodleApiFetcher.ts`: Main Moodle API integration
-  - `allyFetcher.ts`: Integration with Ally for accessibility resources
-  - `edstemFetcher.ts`: Integration with EdStem discussion forums
-  - `cseFetcher.ts`: Custom fetcher for CSE-specific resources
-- `src/knowledge/`: Knowledge base management
-  - `db.ts`: Database connection and setup
-  - `schema.sql`: Database schema definition
-  - `insert.ts`: Data insertion logic
-  - `query.ts`: Knowledge retrieval functions
-  - `builder.ts`: Knowledge base construction utilities
-- `src/ai/`: AI-powered answer generation
-  - `openaiClient.ts`: OpenAI API integration
-  - `promptTemplates.ts`: Templates for AI prompting
-  - `answer.ts`: Answer generation logic
-- `src/cli/`: Command-line interface
-- `src/config/`: Configuration management
-- `src/utils/`: Utility functions
+## 📝 注意事项
 
-## Development Roadmap
+- 该工具仅供学习和个人使用
+- 请遵守学校和 Moodle 的使用政策
+- 抓取时请控制频率，避免对 Moodle 服务器造成过大负担
+- 保管好你的 OpenAI API 密钥，避免额外费用
 
-### Phase 1: Core Functionality
-- Configuration and database setup
-- Moodle API integration
-- Knowledge base storage and indexing
+## 🤝 贡献
 
-### Phase 2: AI Question Answering
-- Keyword-based knowledge retrieval
-- OpenAI integration
-- Answer generation with source citations
+欢迎提交 Pull Requests 和 Issues！
 
-### Phase 3: User Interface
-- Command line tool development
-- Interactive question-answer flow
-- Documentation for end users
+## 📄 许可证
 
-### Phase 4: Enhanced Features
-- Multi-platform integrations (EdStem, Ally)
-- Automated content updates
-- Multi-language support
-- Custom prompt templates
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a new Pull Request
-
-## License
-
-MIT
-
-## Acknowledgments
-
-- UNSW Moodle API
-- OpenAI for providing the GPT API
-- Contributors and testers
+MIT License

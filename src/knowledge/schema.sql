@@ -1,49 +1,54 @@
--- 知识库表结构
--- 存储从Moodle和其他平台抓取的内容
+-- 知识库架构定义
+-- 用于存储 Moodle 课程内容的 SQLite 数据库结构
 
--- 删除已存在的表（谨慎使用）
-DROP TABLE IF EXISTS knowledge_items;
-
--- 创建知识条目表
-CREATE TABLE knowledge_items (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  course_id TEXT NOT NULL,           -- 课程ID
-  type TEXT NOT NULL,                -- 类型：announcement, assignment, qa, resource
-  title TEXT NOT NULL,               -- 标题
-  content TEXT NOT NULL,             -- 内容
-  metadata TEXT,                     -- 元数据，JSON格式
-  source TEXT NOT NULL,              -- 来源，例如 "moodle", "edstem"
-  source_id TEXT NOT NULL,           -- 来源系统中的ID
-  created INTEGER NOT NULL,          -- 创建时间戳
-  modified INTEGER NOT NULL,         -- 修改时间戳
-  embedding TEXT                     -- 向量嵌入，用于语义搜索（可选）
+-- 知识项表，存储所有抓取的内容
+CREATE TABLE IF NOT EXISTS knowledge_items (
+  id TEXT PRIMARY KEY,  -- 唯一标识符
+  title TEXT NOT NULL,  -- 内容标题
+  type TEXT NOT NULL,   -- 内容类型 (course_info, assignment, resource, announcement, forum_post, quiz, other)
+  content TEXT NOT NULL, -- 内容文本
+  html_content TEXT,    -- HTML 格式内容（如果有）
+  course_id INTEGER NOT NULL,  -- 课程 ID
+  course_name TEXT NOT NULL,   -- 课程名称
+  section_name TEXT,    -- 所属章节名称
+  url TEXT,             -- 原始 URL（如果适用）
+  due_date TEXT,        -- 截止日期（如果适用）
+  created_at TEXT NOT NULL,  -- 创建时间
+  updated_at TEXT NOT NULL,  -- 更新时间
+  metadata TEXT         -- 额外元数据 JSON 字符串
 );
-
--- 创建索引
-CREATE INDEX idx_knowledge_course_id ON knowledge_items(course_id);
-CREATE INDEX idx_knowledge_type ON knowledge_items(type);
-CREATE INDEX idx_knowledge_source ON knowledge_items(source);
-CREATE INDEX idx_knowledge_source_id ON knowledge_items(source_id);
-CREATE UNIQUE INDEX idx_knowledge_source_source_id ON knowledge_items(source, source_id);
 
 -- 全文搜索索引
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
-  title, 
-  content, 
-  content='knowledge_items', 
-  content_rowid='id'
+  id,
+  title,
+  content,
+  section_name,
+  content='knowledge_items',
+  content_rowid='rowid'
 );
 
--- 创建触发器，自动更新全文搜索索引
-CREATE TRIGGER IF NOT EXISTS knowledge_items_ai AFTER INSERT ON knowledge_items BEGIN
-  INSERT INTO knowledge_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+-- 触发器：添加新记录到 FTS 表
+CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge_items BEGIN
+  INSERT INTO knowledge_fts(rowid, id, title, content, section_name)
+  VALUES (new.rowid, new.id, new.title, new.content, new.section_name);
 END;
 
-CREATE TRIGGER IF NOT EXISTS knowledge_items_ad AFTER DELETE ON knowledge_items BEGIN
-  INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
+-- 触发器：更新 FTS 表中的记录
+CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge_items BEGIN
+  INSERT INTO knowledge_fts(knowledge_fts, rowid, id, title, content, section_name)
+  VALUES ('delete', old.rowid, old.id, old.title, old.content, old.section_name);
+  INSERT INTO knowledge_fts(rowid, id, title, content, section_name)
+  VALUES (new.rowid, new.id, new.title, new.content, new.section_name);
 END;
 
-CREATE TRIGGER IF NOT EXISTS knowledge_items_au AFTER UPDATE ON knowledge_items BEGIN
-  INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content) VALUES('delete', old.id, old.title, old.content);
-  INSERT INTO knowledge_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+-- 触发器：删除 FTS 表中的记录
+CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge_items BEGIN
+  INSERT INTO knowledge_fts(knowledge_fts, rowid, id, title, content, section_name)
+  VALUES ('delete', old.rowid, old.id, old.title, old.content, old.section_name);
 END;
+
+-- 创建索引以提高查询性能
+CREATE INDEX IF NOT EXISTS idx_knowledge_course ON knowledge_items(course_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_type ON knowledge_items(type);
+CREATE INDEX IF NOT EXISTS idx_knowledge_updated ON knowledge_items(updated_at);

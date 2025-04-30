@@ -1,72 +1,100 @@
 import OpenAI from 'openai';
+import { appSettings } from '../config/settings';
 import { logger } from '../utils/logger';
-import { config } from '../config/settings';
-
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
+import { ChatCompletionMessageParam } from 'openai/resources';
 
 /**
- * 管理与 OpenAI API 的交互
+ * OpenAI API client wrapper
  */
 export class OpenAIClient {
-  private openai: OpenAI;
+  private client: OpenAI;
   private model: string;
-
-  constructor(apiKey: string = config.openai.apiKey, model: string = config.openai.model) {
-    this.openai = new OpenAI({
-      apiKey: apiKey
-    });
-    this.model = model || 'gpt-4';
-    logger.info(`OpenAI 客户端初始化完成，使用模型: ${this.model}`);
-  }
+  private temperature: number;
+  private maxTokens: number;
 
   /**
-   * 生成聊天完成
-   * @param messages 消息数组，包含系统、用户和助手的消息
-   * @returns 生成的文本
+   * Initialize OpenAI client
    */
-  async generateChatCompletion(messages: ChatMessage[]): Promise<string> {
-    try {
-      logger.info('发送请求到 OpenAI API');
-      
-      const response = await this.openai.chat.completions.create({
-        model: this.model,
-        messages: messages,
-        temperature: 0.7,
-        max_tokens: 1000,
-        top_p: 1,
-        frequency_penalty: 0,
-        presence_penalty: 0
-      });
-
-      const responseText = response.choices[0]?.message?.content || '';
-      logger.info('成功收到 OpenAI API 响应');
-      
-      return responseText;
-    } catch (error) {
-      logger.error('OpenAI API 请求失败', { error });
-      throw new Error(`OpenAI API 请求失败: ${error}`);
+  constructor() {
+    if (!appSettings.openaiApiKey) {
+      throw new Error('OpenAI API key is not set. Please set OPENAI_API_KEY environment variable or configure it in auth.json.');
     }
+
+    this.client = new OpenAI({
+      apiKey: appSettings.openaiApiKey,
+    });
+
+    this.model = appSettings.openaiModel;
+    this.temperature = appSettings.openaiTemperature;
+    this.maxTokens = appSettings.openaiMaxTokens;
+
+    logger.debug(`OpenAI client initialized with model: ${this.model}`);
   }
 
   /**
-   * 创建嵌入向量
-   * @param text 要嵌入的文本
-   * @returns 嵌入向量
+   * Generate a completion using OpenAI API
+   * @param prompt The prompt text or messages
+   * @param options Optional parameters to override defaults
+   * @returns The generated completion text
    */
-  async createEmbedding(text: string): Promise<number[]> {
+  async complete(
+    prompt: string | Array<{role: string, content: string}>,
+    options?: {
+      temperature?: number;
+      maxTokens?: number;
+      model?: string;
+    }
+  ): Promise<string> {
+    const model = options?.model || this.model;
+    const temperature = options?.temperature || this.temperature;
+    const maxTokens = options?.maxTokens || this.maxTokens;
+
+    logger.debug(`Sending request to OpenAI with model: ${model}, temperature: ${temperature}`);
+
     try {
-      const response = await this.openai.embeddings.create({
-        model: 'text-embedding-ada-002',
-        input: text
+      let messages: ChatCompletionMessageParam[];
+
+      if (typeof prompt === 'string') {
+        messages = [{ role: 'user', content: prompt }];
+      } else {
+        messages = prompt.map(msg => {
+          // Ensure role is correctly typed as a valid ChatCompletionMessageParam role
+          const role = msg.role as 'user' | 'system' | 'assistant' | 'function' | 'tool';
+          
+          // For function and tool roles that require additional properties, add them conditionally
+          if (role === 'function' || role === 'tool') {
+            // Return a placeholder for function/tool messages - these shouldn't actually be used in this context
+            // but we need to handle the type checking
+            return {
+              role,
+              content: msg.content,
+              name: 'placeholder' // Adding required 'name' property for function/tool messages
+            } as ChatCompletionMessageParam;
+          }
+          
+          return { 
+            role, 
+            content: msg.content 
+          } as ChatCompletionMessageParam;
+        });
+      }
+
+      const response = await this.client.chat.completions.create({
+        model: model,
+        messages: messages,
+        temperature: temperature,
+        max_tokens: maxTokens,
       });
 
-      return response.data[0].embedding;
+      const result = response.choices[0]?.message?.content || '';
+      logger.debug(`Received response from OpenAI`);
+      return result;
     } catch (error) {
-      logger.error('创建嵌入向量失败', { error });
-      throw new Error(`创建嵌入向量失败: ${error}`);
+      logger.error(`OpenAI API error: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`Failed to generate completion: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 }
+
+// Create a singleton instance
+export const openai = new OpenAIClient();

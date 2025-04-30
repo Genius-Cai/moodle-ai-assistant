@@ -1,184 +1,186 @@
+import { v4 as uuidv4 } from 'uuid';
+import { DatabaseManager } from './db';
+import { InsertParams, KnowledgeItem } from './types';
 import { logger } from '../utils/logger';
-import { query, execute, transaction, getDB } from './db';
-import { KnowledgeItem } from '../types/api';
 
 /**
- * 将知识条目插入到数据库中
- * @param item 知识条目
- * @returns 插入的条目ID
+ * 知识库插入类 - 负责将抓取的数据插入到知识库
  */
-export async function insertKnowledgeItem(item: KnowledgeItem): Promise<number> {
-  try {
-    const now = Math.floor(Date.now() / 1000);
-    
-    // 检查是否已存在相同来源和ID的条目
-    const existingItems = await query<{ id: number, modified: number }>(
-      'SELECT id, modified FROM knowledge_items WHERE source = ? AND source_id = ?',
-      [item.source, item.sourceId]
-    );
+export class KnowledgeInserter {
+  private dbManager: DatabaseManager;
 
-    // 如果存在相同条目，且内容没有变化，则不更新
-    if (existingItems.length > 0) {
-      const existingItem = existingItems[0];
+  constructor() {
+    this.dbManager = DatabaseManager.getInstance();
+  }
+
+  /**
+   * 将数据插入或更新到知识库
+   * @param params - 插入参数
+   * @returns 插入的知识项
+   */
+  public async insertOrUpdate(params: InsertParams): Promise<KnowledgeItem> {
+    const now = new Date().toISOString();
+    
+    // 生成一个基于内容的唯一 ID，使相同内容的重复抓取会更新而不是新增
+    const contentHash = Buffer.from(`${params.course_id}-${params.title}-${params.type}`).toString('base64');
+    const id = contentHash.slice(0, 22);
+    
+    try {
+      const db = await this.dbManager.getDb();
       
-      // 更新现有条目
-      const result = await execute(
-        `UPDATE knowledge_items SET 
-          title = ?, 
-          content = ?, 
-          metadata = ?,
-          modified = ? 
-        WHERE id = ?`,
-        [item.title, item.content, item.metadata, now, existingItem.id]
+      // 检查知识项是否已存在
+      const existing = await db.get<KnowledgeItem>(
+        'SELECT * FROM knowledge_items WHERE id = ?',
+        id
       );
-
-      logger.info(`更新知识条目: ${item.title} (${existingItem.id})`);
-      return existingItem.id;
-    }
-
-    // 插入新条目
-    const result = await execute(
-      `INSERT INTO knowledge_items (
-        course_id, 
-        type, 
-        title, 
-        content, 
-        metadata, 
-        source, 
-        source_id, 
-        created, 
-        modified, 
-        embedding
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        item.courseId,
-        item.type,
-        item.title,
-        item.content,
-        item.metadata,
-        item.source,
-        item.sourceId,
-        item.created || now,
-        item.modified || now,
-        item.embedding || null
-      ]
-    );
-
-    const db = await getDB();
-    const lastId = await db.get('SELECT last_insert_rowid() as id');
-    
-    logger.info(`插入新知识条目: ${item.title} (${lastId.id})`);
-    return lastId.id;
-  } catch (error) {
-    logger.error(`插入知识条目失败: ${item.title}`, { error });
-    throw new Error(`插入知识条目失败: ${error}`);
-  }
-}
-
-/**
- * 批量插入多个知识条目
- * @param items 知识条目数组
- * @returns 插入的条目数量
- */
-export async function batchInsertKnowledgeItems(items: KnowledgeItem[]): Promise<number> {
-  if (items.length === 0) {
-    return 0;
-  }
-
-  // 使用事务批量插入，确保原子性
-  return transaction(async (db) => {
-    let successCount = 0;
-
-    for (const item of items) {
-      try {
-        await insertKnowledgeItem(item);
-        successCount++;
-      } catch (error) {
-        logger.warn(`批量插入中的条目失败: ${item.title}`, { error });
-        // 继续处理其他条目
+      
+      const item: KnowledgeItem = {
+        id,
+        title: params.title,
+        type: params.type,
+        content: params.content,
+        html_content: params.html_content,
+        course_id: params.course_id,
+        course_name: params.course_name,
+        section_name: params.section_name,
+        url: params.url,
+        due_date: params.due_date,
+        created_at: existing?.created_at || now,
+        updated_at: now,
+        metadata: params.metadata
+      };
+      
+      // 将元数据转换为 JSON 字符串用于存储
+      const metadataJson = item.metadata ? JSON.stringify(item.metadata) : null;
+      
+      if (existing) {
+        // 更新现有条目
+        await db.run(
+          `UPDATE knowledge_items SET 
+           title = ?, type = ?, content = ?, html_content = ?, 
+           course_id = ?, course_name = ?, section_name = ?, 
+           url = ?, due_date = ?, updated_at = ?, metadata = ?
+           WHERE id = ?`,
+          item.title,
+          item.type,
+          item.content,
+          item.html_content,
+          item.course_id,
+          item.course_name,
+          item.section_name,
+          item.url,
+          item.due_date,
+          item.updated_at,
+          metadataJson,
+          item.id
+        );
+        logger.info(`Updated knowledge item: ${item.title} (${item.id})`);
+      } else {
+        // 插入新条目
+        await db.run(
+          `INSERT INTO knowledge_items (
+            id, title, type, content, html_content, 
+            course_id, course_name, section_name, 
+            url, due_date, created_at, updated_at, metadata
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          item.id,
+          item.title,
+          item.type,
+          item.content,
+          item.html_content,
+          item.course_id,
+          item.course_name,
+          item.section_name,
+          item.url,
+          item.due_date,
+          item.created_at,
+          item.updated_at,
+          metadataJson
+        );
+        logger.info(`Inserted new knowledge item: ${item.title} (${item.id})`);
       }
+      
+      return item;
+    } catch (error) {
+      logger.error(`Failed to insert knowledge item: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
     }
-
-    logger.info(`批量插入完成: 成功 ${successCount}/${items.length} 条`);
-    return successCount;
-  });
-}
-
-/**
- * 从Moodle公告创建知识条目
- * @param courseId 课程ID
- * @param announcement 公告内容
- * @returns 创建的知识条目
- */
-export function createAnnouncementItem(
-  courseId: string, 
-  announcement: { title: string, content: string, created: number, id: string }
-): KnowledgeItem {
-  return {
-    courseId,
-    type: 'announcement',
-    title: announcement.title,
-    content: announcement.content,
-    metadata: JSON.stringify({ 
-      postedDate: new Date(announcement.created * 1000).toISOString() 
-    }),
-    source: 'moodle',
-    sourceId: announcement.id,
-    created: announcement.created,
-    modified: announcement.created
-  };
-}
-
-/**
- * 从Moodle作业创建知识条目
- * @param courseId 课程ID
- * @param assignment 作业内容
- * @returns 创建的知识条目
- */
-export function createAssignmentItem(
-  courseId: string, 
-  assignment: { title: string, content: string, dueDate: number, id: string }
-): KnowledgeItem {
-  return {
-    courseId,
-    type: 'assignment',
-    title: assignment.title,
-    content: assignment.content,
-    metadata: JSON.stringify({ 
-      dueDate: new Date(assignment.dueDate * 1000).toISOString() 
-    }),
-    source: 'moodle',
-    sourceId: assignment.id,
-    created: Math.floor(Date.now() / 1000),
-    modified: Math.floor(Date.now() / 1000)
-  };
-}
-
-/**
- * 从Moodle内容批量创建知识条目并插入数据库
- * @param courseId 课程ID
- * @param content Moodle课程内容
- * @returns 插入的条目数量
- */
-export async function insertMoodleContent(
-  courseId: string,
-  content: {
-    announcements: Array<{ title: string, content: string, created: number, id: string }>,
-    assignments: Array<{ title: string, content: string, dueDate: number, id: string }>
-  }
-): Promise<number> {
-  const items: KnowledgeItem[] = [];
-
-  // 处理公告
-  for (const announcement of content.announcements) {
-    items.push(createAnnouncementItem(courseId, announcement));
   }
 
-  // 处理作业
-  for (const assignment of content.assignments) {
-    items.push(createAssignmentItem(courseId, assignment));
+  /**
+   * 批量插入多个知识项
+   * @param paramsArray - 插入参数数组
+   * @returns 插入的知识项数组
+   */
+  public async bulkInsert(paramsArray: InsertParams[]): Promise<KnowledgeItem[]> {
+    const results: KnowledgeItem[] = [];
+    
+    try {
+      const db = await this.dbManager.getDb();
+      
+      // 开始事务
+      await db.run('BEGIN TRANSACTION');
+      
+      for (const params of paramsArray) {
+        const item = await this.insertOrUpdate(params);
+        results.push(item);
+      }
+      
+      // 提交事务
+      await db.run('COMMIT');
+      logger.info(`Bulk inserted ${results.length} knowledge items`);
+      
+      return results;
+    } catch (error) {
+      // 回滚事务
+      const db = await this.dbManager.getDb();
+      await db.run('ROLLBACK');
+      
+      logger.error(`Failed to bulk insert knowledge items: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
   }
 
-  // 批量插入
-  return batchInsertKnowledgeItems(items);
+  /**
+   * 从知识库中删除项目
+   * @param id - 要删除的项目 ID
+   * @returns 删除是否成功
+   */
+  public async delete(id: string): Promise<boolean> {
+    try {
+      const db = await this.dbManager.getDb();
+      const result = await db.run('DELETE FROM knowledge_items WHERE id = ?', id);
+      
+      if (result.changes && result.changes > 0) {
+        logger.info(`Deleted knowledge item: ${id}`);
+        return true;
+      } else {
+        logger.warn(`No knowledge item found with id: ${id}`);
+        return false;
+      }
+    } catch (error) {
+      logger.error(`Failed to delete knowledge item: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
+
+  /**
+   * 清除某门课程的所有知识项
+   * @param courseId - 课程 ID
+   * @returns 删除的项目数量
+   */
+  public async clearCourse(courseId: number): Promise<number> {
+    try {
+      const db = await this.dbManager.getDb();
+      const result = await db.run('DELETE FROM knowledge_items WHERE course_id = ?', courseId);
+      
+      const deletedCount = result.changes || 0;
+      logger.info(`Cleared ${deletedCount} knowledge items from course ${courseId}`);
+      
+      return deletedCount;
+    } catch (error) {
+      logger.error(`Failed to clear course knowledge: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+  }
 }
